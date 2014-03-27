@@ -72,6 +72,8 @@ see <https://github.com/trentm/python-markdown2/wiki/Extras> for details):
   and ellipses.
 * toc: The returned HTML string gets a new "toc_html" attribute which is
   a Table of Contents for the document. (experimental)
+* video: Embed video (YouTube only as of now) - either just drop a link
+  or use the image insertion syntax
 * xml: Passes one-liner processing instructions and namespaced XML tags.
 * wiki-tables: Google Code Wiki-style tables. See
   <http://code.google.com/p/support/wiki/WikiSyntax#Tables>.
@@ -234,6 +236,8 @@ class Markdown(object):
         if "smarty-pants" in self.extras:
             self._escape_table['"'] = _hash_text('"')
             self._escape_table["'"] = _hash_text("'")
+        if "video" in self.extras:
+            self._video = StreamingVideoUrlHandler()
 
     def reset(self):
         self.urls = {}
@@ -1172,10 +1176,23 @@ class Markdown(object):
                         title_str = ''
                     if is_img:
                         img_class_str = self._html_class_str_from_tag("img")
-                        result = '<img src="%s" alt="%s"%s%s%s' \
-                            % (url.replace('"', '&quot;'),
-                               _xml_escape_attr(link_text),
-                               title_str, img_class_str, self.empty_element_suffix)
+
+                        #if 'video' extra is enabled
+                        if 'video' in self.extras:
+                            result = self._video.get_embed_video_xml(url)
+                            #should this copy/paste be cleaned up?
+                            if result is None:
+                                result = '<img src="%s" alt="%s"%s%s%s' \
+                                    % (url.replace('"', '&quot;'),
+                                       _xml_escape_attr(link_text),
+                                       title_str, img_class_str, self.empty_element_suffix)
+
+                        else:
+                            result = '<img src="%s" alt="%s"%s%s%s' \
+                                % (url.replace('"', '&quot;'),
+                                   _xml_escape_attr(link_text),
+                                   title_str, img_class_str, self.empty_element_suffix)
+
                         if "smarty-pants" in self.extras:
                             result = result.replace('"', self._escape_table['"'])
                         curr_pos = start_idx + len(result)
@@ -1223,10 +1240,22 @@ class Markdown(object):
                             title_str = ''
                         if is_img:
                             img_class_str = self._html_class_str_from_tag("img")
-                            result = '<img src="%s" alt="%s"%s%s%s' \
-                                % (url.replace('"', '&quot;'),
-                                   link_text.replace('"', '&quot;'),
+                            #if 'video' extra is enabled
+                            if 'video' in self.extras:
+                                result = self._video.get_embed_video_xml(url)
+                                #should this copy/paste be cleaned up?
+                                if result is None:
+                                    result = '<img src="%s" alt="%s"%s%s%s' \
+                                        % (url.replace('"', '&quot;'),
+                                           _xml_escape_attr(link_text),
+                                           title_str, img_class_str, self.empty_element_suffix)
+
+                            else:
+                                result = '<img src="%s" alt="%s"%s%s%s' \
+                                    % (url.replace('"', '&quot;'),
+                                       _xml_escape_attr(link_text),
                                    title_str, img_class_str, self.empty_element_suffix)
+
                             if "smarty-pants" in self.extras:
                                 result = result.replace('"', self._escape_table['"'])
                             curr_pos = start_idx + len(result)
@@ -1832,10 +1861,17 @@ class Markdown(object):
             text = text.replace("\\"+ch, escape)
         return text
 
-    _auto_link_re = re.compile(r'<((https?|ftp):[^\'">\s]+)>', re.I)
+    _auto_link_re = re.compile("((?<!(href|.src|data)=['\"])((http|https|ftp)\://([a-zA-Z0-9\.\-]+(\:[a-zA-Z0-9\.&amp;%\$\-]+)*@)*((25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9])\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9]|0)\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9]|0)\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[0-9])|localhost|([a-zA-Z0-9\-]+\.)*[a-zA-Z0-9\-]+\.(com|edu|gov|int|mil|net|org|biz|arpa|info|name|pro|aero|coop|museum|[a-zA-Z]{2}))(\:[0-9]+)*(/($|[a-zA-Z0-9\.\,\?\'\\\+&amp;%\$#\=~_\-]+))*))")
     def _auto_link_sub(self, match):
         g1 = match.group(1)
-        return '<a href="%s">%s</a>' % (g1, g1)
+        if "video" in self.extras:
+            video_html = self._video.get_embed_video_xml(g1)
+            if video_html == None:
+                return '<a href="%s">%s</a>' % (g1, g1)
+            else:
+                return video_html
+        else:
+            return '<a href="%s">%s</a>' % (g1, g1)
 
     _auto_email_link_re = re.compile(r"""
           <
@@ -2214,6 +2250,151 @@ def _xml_encode_email_char_at_random(ch):
         return '&#%s;' % ord(ch)
 
 
+from xml.etree import ElementTree as etree
+class StreamingVideoUrlHandler(object):
+    """
+    data copied from
+    http://code.google.com/p/python-markdown-video/source/browse/mdx_video.py?r=0.1.6
+
+    Caveat - only YouTube and Vimeo work!
+    
+    Looks like the video hosts do not want to agree
+    on a stable way to embed videos, or a simple mapping of page url
+    to the video streaming url.
+
+    If you wish to support any of those
+    please keep track of possible changes in their url strucure
+    
+    to add another provider, extend the following dictionary
+    * key - name of the hosting service
+    * value - the data.
+
+    In the value of the dictionary, the following is expected:
+    * ``regex`` - a compiled regular expression matching the url used to share the video
+      NOTE: if regex has just one parameter to extract - name it "param"
+
+    * ``get_params`` - [optional] - a function that pre-processes the parameters
+      before insertion into the ``stream_url``.
+      The default ``get_params`` is ``lambda v: v.group('param')``. The argument
+      to ``get_params`` always is the match object obtained upon using the ``regex``.
+
+    * ``stream_url`` - a template for the video streaming url.
+      May contain positional string interpolation parameters, in which case
+      parameters will be substituted from the ``get_params`` function
+      (otherwise - ``stream_url`` will be passed as is)
+
+    * ``extra_param_tags`` - [optional] - necessary when the flash objects needs
+      additional <param /> tags inside <object />
+      Format: a tuple of dictionaries, where each dictionaly has
+      two items 'name' and 'value' - 'name' is name of the flash parameter,
+      'value' is a function that takes the ``regex`` match object and
+      returns value of the parameter (for an example, see Yahoo setup below)
+    """
+    providers = {
+        #'blip.tv': { 
+        #    'regex': re.compile(r'([^(]|^)http://(\w+\.|)blip.tv/file/get/(?P<param>\S+.flv)'),
+        #    'stream_url': 'http://blip.tv/scripts/flash/showplayer.swf?file=http://blip.tv/file/get/%s',
+        #    'width': 480,
+        #    'height': 300
+        #},
+        #'dailymotion': {
+        #    'regex': re.compile(r'([^(]|^)http://www\.dailymotion\.com/(?P<param>\S+)'),
+        #    'get_params': lambda m: m.group('param').split('/')[-1],
+        #    'stream_url': 'http://www.dailymotion.com/swf/%s',
+        #    'width': 480,
+        #    'height': 405
+        #},
+        #'gametrailers': {
+        #    'regex': re.compile(r'([^(]|^)http://www.gametrailers.com/video/[a-z0-9-]+/(?P<param>\d+)'),
+        #    'get_params': lambda m: m.group('param').split('/')[-1],
+        #    'stream_url': 'http://www.gametrailers.com/remote_wrap.php?mid=%s',
+        #    'width': 480,
+        #    'height': 392
+        #},
+        #'metacafe': {
+        #    'regex': re.compile(r'([^(]|^)http://www\.metacafe\.com/watch/(?P<param>\S+)/'),
+        #    'stream_url': 'http://www.metacafe.com/fplayer/%s.swf',
+        #    'width': 498,
+        #    'height': 423
+        #},
+        'veoh': {
+            'regex': re.compile(r'([^(]|^)http://www\.veoh\.com/\S*(#watch%3D|watch/)(?P<param>\w+)'),
+            'stream_url': 'http://www.veoh.com/videodetails2.swf?permalinkId=%s',
+            'width': 410,
+            'height': 341
+        },
+        #'vimeo': {
+        #    'regex': re.compile(r'([^(]|^)http://(www.|)vimeo\.com/(?P<param>\d+)\S*'),
+        #    'stream_url': 'http://vimeo.com/moogaloop.swf?clip\_id=%s&amp;server=vimeo.com',
+        #    'width': 400,
+        #    'height': 321
+        #},
+        #yahoo - is special two parameters in the url, and more elaborate <object> is needed
+        #yahoo': {
+        #    'regex': re.compile(r'([^(]|^)http://video\.yahoo\.com/watch/(?P<yahoovid>\d+)/(?P<yahooid>\d+)'),
+        #    'stream_url': 'http://d.yimg.com/static.video.yahoo.com/yep/YV_YEP.swf?ver=2.2.40',
+        #    'extra_param_tags': (
+        #        {
+        #            'name': 'flashVars',
+        #            'value': lambda m: 'id=%s&vid=%s' % (m.group('yahooid'), m.group('yahoovid'))
+        #        }
+        #    ),
+        #    'width': 512,
+        #    'height': 322
+        #},
+        'youtube': {
+            'regex': re.compile(r'([^(]|^)http://www\.youtube\.com/watch\?\S*v=(?P<param>[A-Za-z0-9_&=-]+)\S*'),
+            'stream_url': 'http://www.youtube.com/v/%s',
+            'width': 425,
+            'height': 344
+        },
+
+    }
+
+    def get_embed_video_xml(self, url):
+        """returns name of the video provider
+        or None if url does not match any
+
+        the etree manipulation copied from mdx_video extension
+        for the original markdown module
+        """
+        for data in self.providers.values():
+            m = data['regex'].match(url)
+            if m:
+
+                get_params = data.get('get_params', lambda m: m.group('param'))
+
+                if '%s' in data['stream_url']:
+                    stream_url = data['stream_url'] % get_params(m)
+                else:
+                    stream_url = data['stream_url']
+
+                flash = etree.Element('object')
+                flash.set('type', 'application/x-shockwave-flash')
+                flash.set('data', stream_url)
+                flash.set('width', str(data['width']))
+                flash.set('height', str(data['height']))
+
+                param = etree.Element('param')
+                param.set('name', 'movie')
+                param.set('value', stream_url)
+                flash.append(param)
+
+                param = etree.Element('param')
+                param.set('name', 'allowFullScreen')
+                param.set('value', 'true')
+                flash.append(param)
+
+                if 'extra_param_tags' in data:
+                    for extra_param_tag in data['extra_param_tags']:
+                        param = etree.Element('param')
+                        param.set('name', extra_param_tag['name'])
+                        param.set('value', extra_param_tag['value'](m))
+                        flash.append(param)
+
+                return '<p>' + etree.tostring(flash) + '</p>'
+
+        return None
 
 #---- mainline
 
